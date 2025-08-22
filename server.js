@@ -1,92 +1,80 @@
-// server.js
 import express from "express";
 import bodyParser from "body-parser";
-import twilio from "twilio";
 import dotenv from "dotenv";
-import { initializeApp, cert } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
+import twilio from "twilio";
+import admin from "firebase-admin";
 
-// Load env vars
 dotenv.config();
 
-// Initialize Firebase Admin
-initializeApp({
-  credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY))
-});
-const db = getFirestore();
-
-// Twilio client
-const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-
 const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// SMS Webhook (Twilio will POST here)
+// Initialize Firebase Admin (it auto-loads serviceAccountKey.json from env var)
+admin.initializeApp({
+  credential: admin.credential.applicationDefault(),
+});
+const db = admin.firestore();
+
+// Root
+app.get("/", (req, res) => {
+  res.send("🚀 SMS server is running...");
+});
+
+// Twilio webhook
 app.post("/sms", async (req, res) => {
+  const incomingMsg = req.body.Body || "";
+  const fromNumber = req.body.From;
+
+  console.log(`📩 Incoming SMS: ${incomingMsg} from ${fromNumber}`);
+
+  // Simple parsing
+  const parts = incomingMsg.trim().split(" ");
+  if (parts[0].toLowerCase() !== "book") {
+    return res.type("text/xml").send(
+      `<Response><Message>❌ Invalid format. Use: BOOK CITY DATE TIME</Message></Response>`
+    );
+  }
+
+  const city = parts[1];
+  const date = parts[2];
+  const time = parts[3];
+
   try {
-    const incomingMsg = req.body.Body?.trim() || "";
-    const from = req.body.From;
+    const lotRef = db.collection(city + "lot").doc("slots");
+    const docSnap = await lotRef.get();
 
-    // Example: "BOOK CHENNAI date=2025-08-25 time=15:00"
-    // Extract city, date, and time using regex
-    const cityMatch = incomingMsg.match(/BOOK\s+(\w+)/i);
-    const dateMatch = incomingMsg.match(/(\d{4}-\d{2}-\d{2})/); // YYYY-MM-DD
-    const timeMatch = incomingMsg.match(/(\d{1,2}:\d{2})/);     // HH:MM
-
-    if (!cityMatch || !dateMatch || !timeMatch) {
-      await client.messages.create({
-        body: "Invalid booking format. Please use: BOOK CITY YYYY-MM-DD HH:MM",
-        from: process.env.TWILIO_PHONE_NUMBER,
-        to: from
-      });
-      return res.send("<Response></Response>");
+    if (!docSnap.exists) {
+      return res.type("text/xml").send(
+        `<Response><Message>❌ No parking lot found for ${city}</Message></Response>`
+      );
     }
 
-    const city = cityMatch[1].toLowerCase();
-    const date = dateMatch[1];
-    const time = timeMatch[1];
+    const slots = docSnap.data().slots || [];
+    const available = slots.find((s) => !s.booked);
 
-    // Firestore collection: city + "lot"
-    const lotCollection = db.collection(city + "lot");
-
-    // Check availability
-    const snapshot = await lotCollection
-      .where("date", "==", date)
-      .where("time", "==", time)
-      .get();
-
-    if (!snapshot.empty) {
-      // Slot already booked
-      await client.messages.create({
-        body: `❌ Sorry! No available slot in ${city} on ${date} at ${time}.`,
-        from: process.env.TWILIO_PHONE_NUMBER,
-        to: from
-      });
-      return res.send("<Response></Response>");
+    if (!available) {
+      return res.type("text/xml").send(
+        `<Response><Message>🚫 No available slots at ${city} on ${date} ${time}</Message></Response>`
+      );
     }
 
-    // Otherwise, create booking
-    const bookingRef = await lotCollection.add({
-      user: from,
-      date: date,
-      time: time,
-      createdAt: new Date().toISOString()
-    });
+    // Update Firestore
+    available.booked = true;
+    await lotRef.update({ slots });
 
-    // Send confirmation SMS
-    await client.messages.create({
-      body: `✅ Parking booked!\nCity: ${city}\nDate: ${date}\nTime: ${time}\nBooking ID: ${bookingRef.id}`,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: from
-    });
-
-    res.send("<Response></Response>");
+    return res.type("text/xml").send(
+      `<Response><Message>✅ Booking confirmed at ${city} on ${date} ${time}</Message></Response>`
+    );
   } catch (err) {
-    console.error("Error handling SMS:", err);
-    res.status(500).send("Server Error");
+    console.error("🔥 Error:", err);
+    return res.type("text/xml").send(
+      `<Response><Message>❌ Server error. Try again later.</Message></Response>`
+    );
   }
 });
 
-const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
