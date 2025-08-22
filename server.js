@@ -1,59 +1,50 @@
-import express from "express";
-import bodyParser from "body-parser";
-import dotenv from "dotenv";
-import twilio from "twilio";
-
-dotenv.config();
+// server.js
+const express = require("express");
+const bodyParser = require("body-parser");
+const twilio = require("twilio");
+require("dotenv").config();
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// Middleware to parse incoming Twilio webhook
+app.use(bodyParser.urlencoded({ extended: false }));
 
-// Twilio Config
+// Twilio Credentials (from .env file)
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
-const twilioNumber = process.env.TWILIO_PHONE_NUMBER;
 const client = twilio(accountSid, authToken);
 
-// Health Check
-app.get("/", (req, res) => {
-  res.send("🚨 Booking Management Server is running...");
-});
+// Twilio will POST incoming SMS here
+app.post("/sms", (req, res) => {
+  const incomingMsg = req.body.Body;   // SMS content
+  const fromNumber = req.body.From;    // User’s phone number
+  const toNumber = req.body.To;        // Twilio number
 
-// API to send SMS
-app.post("/send-sms", async (req, res) => {
-  try {
-    const { to, message } = req.body;
+  console.log(`📩 Incoming SMS from ${fromNumber}: ${incomingMsg}`);
 
-    if (!to || !message) {
-      return res.status(400).json({ error: "Recipient number and message are required." });
-    }
-
-    const sms = await client.messages.create({
-      body: message,
-      from: twilioNumber,
-      to: to,
-    });
-
-    res.status(200).json({ success: true, sid: sms.sid });
-  } catch (error) {
-    console.error("SMS Error:", error);
-    res.status(500).json({ error: "Failed to send SMS", details: error.message });
+  // Example: If user sends "Book Chennai 2025-08-20 10:00AM"
+  let replyMsg;
+  if (incomingMsg.toLowerCase().startsWith("book")) {
+    replyMsg = `✅ Booking request received: ${incomingMsg}`;
+  } else {
+    replyMsg = `❌ Invalid format. Please use: Book <City> <YYYY-MM-DD> <Time>`;
   }
+
+  // Send SMS reply using Twilio REST API
+  client.messages
+    .create({
+      body: replyMsg,
+      from: toNumber,    // Your Twilio number
+      to: fromNumber     // User’s number
+    })
+    .then(message => console.log("✅ Reply sent, SID:", message.sid))
+    .catch(err => console.error("❌ Error sending reply:", err));
+
+  // Respond to Twilio with empty 200 OK (prevents re-tries)
+  res.status(200).end();
 });
 
-// API to receive incoming SMS (Webhook)
-app.post("/receive-sms", (req, res) => {
-  const smsData = req.body;
-  console.log("📩 Incoming SMS:", smsData);
-
-  res.send("<Response><Message>✅ Your request has been received. Stay safe!</Message></Response>");
-});
-
-// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on https://smsbooking-urbpark.onrender.com`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
