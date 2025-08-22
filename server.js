@@ -1,8 +1,8 @@
 // server.js
-const express = require("express");
-const bodyParser = require("body-parser");
-const twilio = require("twilio");
-require("dotenv").config();
+ import express from "express";
+ import bodyParser from "body-parser";
+ import dotenv from "dotenv";
+ import twilio from "twilio";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
