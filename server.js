@@ -12,7 +12,9 @@ const PORT = process.env.PORT || 3000;
 // Middleware to parse incoming Twilio webhook
 app.use(bodyParser.urlencoded({ extended: false 
                               }));
-
+app.get("/", (req, res) => {
+  res.send("🚀 SMS server is running...");
+});
 // Twilio will POST incoming SMS here
 app.post("/sms", (req, res) => {
   const incomingMsg = req.body.Body;   // SMS content
