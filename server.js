@@ -2,89 +2,91 @@
 import express from "express";
 import bodyParser from "body-parser";
 import twilio from "twilio";
+import dotenv from "dotenv";
+import { initializeApp, cert } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+
+// Load env vars
+dotenv.config();
+
+// Initialize Firebase Admin
+initializeApp({
+  credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY))
+});
+const db = getFirestore();
+
+// Twilio client
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 const app = express();
-const port = 3000;
-
-// Twilio config (replace with real creds in production)
-const accountSid = "ACXXXXXXXXXXXXXXXXXXXX"; // from Twilio console
-const authToken = "your_auth_token"; // from Twilio console
-const twilioClient = twilio(accountSid, authToken);
-const twilioNumber = "+1234567890"; // your Twilio number
-
 app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
-// Mock parking lots (city+"lots")
-let parkingDB = {
-  chennailots: [
-    { slotId: 1, time: "2025-08-23 10:00", booked: false },
-    { slotId: 2, time: "2025-08-23 11:00", booked: false },
-    { slotId: 3, time: "2025-08-23 12:00", booked: false },
-  ],
-  bangalorelots: [
-    { slotId: 1, time: "2025-08-23 10:00", booked: false },
-    { slotId: 2, time: "2025-08-23 11:00", booked: true }, // already booked
-  ],
-};
-
-// Helper: parse message "BOOK CHENNAI 2025-08-23 10:00"
-function parseBookingMessage(body) {
-  let parts = body.trim().split(" ");
-  if (parts.length < 4 || parts[0].toUpperCase() !== "BOOK") {
-    return null;
-  }
-  let city = parts[1].toLowerCase();
-  let date = parts[2];
-  let time = parts[3];
-  return { city, datetime: `${date} ${time}` };
-}
-
-// Webhook for SMS
+// SMS Webhook (Twilio will POST here)
 app.post("/sms", async (req, res) => {
-  const incomingMsg = req.body.Body;
-  const fromNumber = req.body.From;
+  try {
+    const incomingMsg = req.body.Body?.trim() || "";
+    const from = req.body.From;
 
-  const bookingReq = parseBookingMessage(incomingMsg);
+    // Example: "BOOK CHENNAI date=2025-08-25 time=15:00"
+    // Extract city, date, and time using regex
+    const cityMatch = incomingMsg.match(/BOOK\s+(\w+)/i);
+    const dateMatch = incomingMsg.match(/(\d{4}-\d{2}-\d{2})/); // YYYY-MM-DD
+    const timeMatch = incomingMsg.match(/(\d{1,2}:\d{2})/);     // HH:MM
 
-  if (!bookingReq) {
-    return res.type("text/xml").send(`
-      <Response>
-        <Message>Invalid format. Use: BOOK CITY YYYY-MM-DD HH:MM</Message>
-      </Response>
-    `);
-  }
+    if (!cityMatch || !dateMatch || !timeMatch) {
+      await client.messages.create({
+        body: "Invalid booking format. Please use: BOOK CITY YYYY-MM-DD HH:MM",
+        from: process.env.TWILIO_PHONE_NUMBER,
+        to: from
+      });
+      return res.send("<Response></Response>");
+    }
 
-  const { city, datetime } = bookingReq;
-  const lotKey = city + "lots";
+    const city = cityMatch[1].toLowerCase();
+    const date = dateMatch[1];
+    const time = timeMatch[1];
 
-  if (!parkingDB[lotKey]) {
-    return res.type("text/xml").send(`
-      <Response>
-        <Message>No parking lots available in ${city.toUpperCase()}.</Message>
-      </Response>
-    `);
-  }
+    // Firestore collection: city + "lot"
+    const lotCollection = db.collection(city + "lot");
 
-  // Check availability
-  let lots = parkingDB[lotKey];
-  let slot = lots.find((s) => s.time === datetime && !s.booked);
+    // Check availability
+    const snapshot = await lotCollection
+      .where("date", "==", date)
+      .where("time", "==", time)
+      .get();
 
-  if (slot) {
-    slot.booked = true;
-    return res.type("text/xml").send(`
-      <Response>
-        <Message>✅ Booking Confirmed at ${city.toUpperCase()} - Slot ${slot.slotId} on ${datetime}</Message>
-      </Response>
-    `);
-  } else {
-    return res.type("text/xml").send(`
-      <Response>
-        <Message>❌ Sorry, no slots available at ${city.toUpperCase()} for ${datetime}</Message>
-      </Response>
-    `);
+    if (!snapshot.empty) {
+      // Slot already booked
+      await client.messages.create({
+        body: `❌ Sorry! No available slot in ${city} on ${date} at ${time}.`,
+        from: process.env.TWILIO_PHONE_NUMBER,
+        to: from
+      });
+      return res.send("<Response></Response>");
+    }
+
+    // Otherwise, create booking
+    const bookingRef = await lotCollection.add({
+      user: from,
+      date: date,
+      time: time,
+      createdAt: new Date().toISOString()
+    });
+
+    // Send confirmation SMS
+    await client.messages.create({
+      body: `✅ Parking booked!\nCity: ${city}\nDate: ${date}\nTime: ${time}\nBooking ID: ${bookingRef.id}`,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: from
+    });
+
+    res.send("<Response></Response>");
+  } catch (err) {
+    console.error("Error handling SMS:", err);
+    res.status(500).send("Server Error");
   }
 });
 
-app.listen(port, () => {
-  console.log(`🚗 Parking server running at http://localhost:${port}`);
-});
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
