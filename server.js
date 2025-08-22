@@ -1,19 +1,17 @@
 // server.js
- import express from "express";
- import bodyParser from "body-parser";
- import dotenv from "dotenv";
- import twilio from "twilio";
+import express from "express";
+import bodyParser from "body-parser";
+import dotenv from "dotenv";
+import twilio from "twilio";
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware to parse incoming Twilio webhook
-app.use(bodyParser.urlencoded({ extended: false }));
-
-// Twilio Credentials (from .env file)
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
-const client = twilio(accountSid, authToken);
+app.use(bodyParser.urlencoded({ extended: false 
+                              }));
 
 // Twilio will POST incoming SMS here
 app.post("/sms", (req, res) => {
@@ -31,18 +29,13 @@ app.post("/sms", (req, res) => {
     replyMsg = `❌ Invalid format. Please use: Book <City> <YYYY-MM-DD> <Time>`;
   }
 
-  // Send SMS reply using Twilio REST API
-  client.messages
-    .create({
-      body: replyMsg,
-      from: toNumber,    // Your Twilio number
-      to: fromNumber     // User’s number
-    })
-    .then(message => console.log("✅ Reply sent, SID:", message.sid))
-    .catch(err => console.error("❌ Error sending reply:", err));
+  // Build TwiML response
+  const twiml = new twilio.twiml.MessagingResponse();
+  twiml.message(replyMsg);
 
-  // Respond to Twilio with empty 200 OK (prevents re-tries)
-  res.status(200).end();
+  // Send back TwiML as response to Twilio
+  res.type("text/xml");
+  res.send(twiml.toString());
 });
 
 app.listen(PORT, () => {
