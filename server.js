@@ -8,15 +8,20 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const messages = []; // in-memory store for received SMS
+// In-memory store for received SMS (optional)
+const messages = [];
 
+// Twilio client setup
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+// Middleware to parse incoming Twilio webhook (x-www-form-urlencoded)
 app.use(bodyParser.urlencoded({ extended: false }));
 
 app.get("/", (req, res) => {
   res.send("🚀 SMS server is running...");
 });
 
-// View all messages (optional)
+// View received messages (optional)
 app.get("/messages", (req, res) => {
   let html = "<h2>Received SMS messages</h2><ul>";
   messages.forEach(msg => {
@@ -26,7 +31,7 @@ app.get("/messages", (req, res) => {
   res.send(html);
 });
 
-// Twilio webhook for incoming SMS
+// Incoming SMS webhook handler
 app.post("/sms", (req, res) => {
   const incomingMsg = req.body.Body || "";
   const fromNumber = req.body.From || "";
@@ -47,6 +52,27 @@ app.post("/sms", (req, res) => {
 
   res.type("text/xml");
   res.send(twiml.toString());
+});
+
+// New endpoint to send SMS programmatically using Messaging Service SID
+app.post("/send-sms", express.json(), async (req, res) => {
+  const { to, body } = req.body;
+
+  if (!to || !body) {
+    return res.status(400).json({ error: "Missing 'to' or 'body' in request" });
+  }
+
+  try {
+    const message = await client.messages.create({
+      to: to,
+      body: body,
+      messagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID, // Use your Messaging Service SID here
+    });
+
+    res.json({ sid: message.sid, status: message.status, body: message.body });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.listen(PORT, () => {
