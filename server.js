@@ -1,7 +1,6 @@
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import twilio from "twilio";
 import admin from "firebase-admin";
 
 dotenv.config();
@@ -22,13 +21,32 @@ const db = admin.firestore();
 
 // Root
 app.get("/", (req, res) => {
-  res.send("🚀 SMS server is running...");
+  res.send("🚀 SMS Parking Server is running...");
+});
+
+/**
+ * Init route: create sample slots in Firestore for testing
+ * Example: GET /init/Chennai
+ */
+app.get("/init/:city", async (req, res) => {
+  const city = req.params.city.toLowerCase();
+  const lotRef = db.collection(city + "lot").doc("slots");
+
+  await lotRef.set({
+    slots: [
+      { date: "2025-09-05", time: "10:00", booked: false },
+      { date: "2025-09-05", time: "12:00", booked: false },
+      { date: "2025-09-06", time: "18:00", booked: false },
+    ],
+  });
+
+  res.send(`✅ Slots initialized for ${city}`);
 });
 
 // Twilio Webhook
 app.post("/sms", async (req, res) => {
   const incomingMsg = req.body.Body || "";
-  const fromNumber = req.body.From;
+  const fromNumber = req.body.From || "Unknown";
 
   console.log(`📩 Incoming SMS: ${incomingMsg} from ${fromNumber}`);
 
@@ -48,7 +66,7 @@ app.post("/sms", async (req, res) => {
     await db.runTransaction(async (t) => {
       let doc = await t.get(lotRef);
 
-      // If document doesn’t exist, create it with empty slots
+      // If document doesn’t exist → create empty
       if (!doc.exists) {
         console.log(`⚠️ No parking lot found for ${city}, creating new one...`);
         t.set(lotRef, { slots: [] });
