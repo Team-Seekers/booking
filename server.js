@@ -8,12 +8,11 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware (Twilio sends urlencoded)
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
 // Initialize Firebase Admin
-// Make sure GOOGLE_APPLICATION_CREDENTIALS points to your serviceAccountKey.json
 admin.initializeApp({
   credential: admin.credential.applicationDefault(),
 });
@@ -24,10 +23,7 @@ app.get("/", (req, res) => {
   res.send("🚀 SMS Parking Server is running...");
 });
 
-/**
- * Init route: create sample slots in Firestore for testing
- * Example: GET /init/Chennai
- */
+// Init route: create sample slots in Firestore for testing
 app.get("/init/:city", async (req, res) => {
   const city = req.params.city.toLowerCase();
   const lotRef = db.collection(city + "lot").doc("slots");
@@ -54,7 +50,7 @@ app.post("/sms", async (req, res) => {
 
   // Validate SMS format
   if (parts.length < 4 || parts[0].toLowerCase() !== "book") {
-    return res.set("Content-Type", "application/xml").send(
+    return res.type("text/xml").send(
       `<Response><Message>❌ Invalid format. Use: BOOK CITY DATE TIME</Message></Response>`
     );
   }
@@ -66,7 +62,6 @@ app.post("/sms", async (req, res) => {
     await db.runTransaction(async (t) => {
       let doc = await t.get(lotRef);
 
-      // If document doesn’t exist → create empty
       if (!doc.exists) {
         console.log(`⚠️ No parking lot found for ${city}, creating new one...`);
         t.set(lotRef, { slots: [] });
@@ -90,16 +85,18 @@ app.post("/sms", async (req, res) => {
       t.update(lotRef, { slots });
     });
 
-    return res.set("Content-Type", "application/xml").send(
+    return res.type("text/xml").send(
       `<Response><Message>✅ Booking confirmed at ${city} on ${date} ${time}</Message></Response>`
     );
   } catch (err) {
     console.error("🔥 Booking Error:", err.message);
 
-    return res.set("Content-Type", "application/xml").send(
+    return res.type("text/xml").send(
       `<Response><Message>❌ ${err.message}</Message></Response>`
     );
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`🚀 Server running on http://localhost:${PORT}`)
+);
