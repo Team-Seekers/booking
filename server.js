@@ -59,40 +59,42 @@ app.post("/sms", async (req, res) => {
   const lotRef = db.collection(city.toLowerCase() + "lot").doc("slots");
 
   try {
+    let bookingMessage = "";
+
     await db.runTransaction(async (t) => {
-      let doc = await t.get(lotRef);
+      const doc = await t.get(lotRef);
 
       if (!doc.exists) {
-        console.log(`⚠️ No parking lot found for ${city}, creating new one...`);
-        t.set(lotRef, { slots: [] });
-        throw new Error(`No parking slots available for ${city} yet`);
+        throw new Error(`No parking lot found for ${city}`);
       }
 
-      const data = doc.data();
-      let slots = data.slots || [];
+      let slots = doc.data().slots || [];
 
       // Find slot for given date/time
-      const index = slots.findIndex(
-        (s) => s.date === date && s.time === time && !s.booked
-      );
+      const slot = slots.find((s) => s.date === date && s.time === time);
 
-      if (index === -1) {
-        throw new Error(`🚫 No slots available at ${city} on ${date} ${time}`);
+      if (!slot) {
+        throw new Error(`🚫 No slots found for ${city} on ${date} ${time}`);
+      }
+
+      if (slot.booked) {
+        throw new Error(`❌ Slot already booked at ${city} on ${date} ${time}`);
       }
 
       // Mark slot as booked
-      slots[index].booked = true;
+      slot.booked = true;
       t.update(lotRef, { slots });
+      bookingMessage = `✅ Booking confirmed at ${city} on ${date} ${time}`;
     });
 
     return res.type("text/xml").send(
-      `<Response><Message>✅ Booking confirmed at ${city} on ${date} ${time}</Message></Response>`
+      `<Response><Message>${bookingMessage}</Message></Response>`
     );
   } catch (err) {
     console.error("🔥 Booking Error:", err.message);
 
     return res.type("text/xml").send(
-      `<Response><Message>❌ ${err.message}</Message></Response>`
+      `<Response><Message>${err.message}</Message></Response>`
     );
   }
 });
