@@ -1,104 +1,95 @@
 import express from "express";
 import bodyParser from "body-parser";
-import dotenv from "dotenv";
+import cors from "cors";
 import admin from "firebase-admin";
+import { readFileSync } from "fs";
 
-dotenv.config();
+// Load Firebase service account key
+const serviceAccount = JSON.parse(
+  readFileSync("./serviceAccountKey.json", "utf8")
+);
 
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Middleware (Twilio sends urlencoded)
-app.use(bodyParser.urlencoded({ extended: false }));
+app.use(cors());
 app.use(bodyParser.json());
 
-// Initialize Firebase Admin
-admin.initializeApp({
-  credential: admin.credential.applicationDefault(),
-});
-const db = admin.firestore();
-
-// Root
-app.get("/", (req, res) => {
-  res.send("🚀 SMS Parking Server is running...");
-});
-
-// Init route: create sample slots in Firestore for testing
-app.get("/init/:city", async (req, res) => {
-  const city = req.params.city.toLowerCase();
-  const lotRef = db.collection(city + "lot").doc("slots");
-
-  await lotRef.set({
-    slots: [
-      { date: "2025-09-05", time: "10:00", booked: false },
-      { date: "2025-09-05", time: "12:00", booked: false },
-      { date: "2025-09-06", time: "18:00", booked: false },
-    ],
-  });
-
-  res.send(`✅ Slots initialized for ${city}`);
-});
-
-// Twilio Webhook
-app.post("/sms", async (req, res) => {
-  const incomingMsg = req.body.Body || "";
-  const fromNumber = req.body.From || "Unknown";
-
-  console.log(`📩 Incoming SMS: ${incomingMsg} from ${fromNumber}`);
-
-  const parts = incomingMsg.trim().split(" ");
-
-  // Validate SMS format
-  if (parts.length < 4 || parts[0].toLowerCase() !== "book") {
-    return res.type("text/xml").send(
-      `<Response><Message>❌ Invalid format. Use: BOOK CITY DATE TIME</Message></Response>`
-    );
-  }
-
-  const [_, city, date, time] = parts;
-  const lotRef = db.collection(city.toLowerCase() + "lot").doc("slots");
-
+// 🔹 Book a slot
+app.post("/book", async (req, res) => {
   try {
-    let bookingMessage = "";
+    const { slotId, userId, vehicleNumber, startTime, endTime } = req.body;
 
-    await db.runTransaction(async (t) => {
-      const doc = await t.get(lotRef);
+    if (!slotId || !userId || !startTime || !endTime) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
 
-      if (!doc.exists) {
-        throw new Error(`No parking lot found for ${city}`);
-      }
+    const bookingsRef = db.collection("bookings");
+    const snapshot = await bookingsRef
+      .where("slotId", "==", slotId)
+      .where("endTime", ">", startTime) // overlapping check
+      .where("startTime", "<", endTime)
+      .get();
 
-      let slots = doc.data().slots || [];
+    if (!snapshot.empty) {
+      return res.status(409).json({
+        success: false,
+        message: "Slot is already booked for this time",
+      });
+    }
 
-      // Find slot for given date/time
-      const slot = slots.find((s) => s.date === date && s.time === time);
+    // If available → create booking
+    const newBooking = {
+      slotId,
+      userId,
+      vehicleNumber: vehicleNumber || null,
+      startTime,
+      endTime,
+      createdAt: admin.firestore.Timestamp.now(),
+      status: "Booked",
+      paymentComplete: false,
+    };
 
-      if (!slot) {
-        throw new Error(`🚫 No slots found for ${city} on ${date} ${time}`);
-      }
+    const bookingDoc = await bookingsRef.add(newBooking);
 
-      if (slot.booked) {
-        throw new Error(`❌ Slot already booked at ${city} on ${date} ${time}`);
-      }
-
-      // Mark slot as booked
-      slot.booked = true;
-      t.update(lotRef, { slots });
-      bookingMessage = `✅ Booking confirmed at ${city} on ${date} ${time}`;
+    return res.json({
+      success: true,
+      message: "Slot booked successfully",
+      bookingId: bookingDoc.id,
     });
-
-    return res.type("text/xml").send(
-      `<Response><Message>${bookingMessage}</Message></Response>`
-    );
   } catch (err) {
-    console.error("🔥 Booking Error:", err.message);
-
-    return res.type("text/xml").send(
-      `<Response><Message>${err.message}</Message></Response>`
-    );
+    console.error("Error booking slot:", err);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
-);
+// 🔹 Check slot availability
+app.get("/availability/:slotId", async (req, res) => {
+  try {
+    const { slotId } = req.params;
+    const { startTime, endTime } = req.query;
+
+    const bookingsRef = db.collection("bookings");
+    const snapshot = await bookingsRef
+      .where("slotId", "==", slotId)
+      .where("endTime", ">", startTime)
+      .where("startTime", "<", endTime)
+      .get();
+
+    if (snapshot.empty) {
+      return res.json({ available: true });
+    } else {
+      return res.json({ available: false });
+    }
+  } catch (err) {
+    console.error("Error checking availability:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+const PORT = 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
