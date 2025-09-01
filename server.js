@@ -1,111 +1,73 @@
 // server.js
 import express from "express";
-import cors from "cors";
 import bodyParser from "body-parser";
+import twilio from "twilio";
 import admin from "firebase-admin";
+import fs from "fs";
 
-// Initialize Firebase Admin SDK
-import serviceAccount from "./serviceAccountKey.json" assert { type: "json" };
+// Load service account JSON manually
+const serviceAccount = JSON.parse(fs.readFileSync("./serviceAccountKey.json", "utf8"));
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://<your-project-id>.firebaseio.com"
 });
 
 const db = admin.firestore();
+
 const app = express();
+app.use(bodyParser.urlencoded({ extended: false }));
 
-app.use(cors());
-app.use(bodyParser.json());
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
 
-// ==========================
-// BOOKING ROUTES
-// ==========================
+app.post("/sms", async (req, res) => {
+  const incomingMsg = req.body.Body.trim();
+  const from = req.body.From;
 
-// Create a booking
-app.post("/api/bookings", async (req, res) => {
   try {
-    const { slotId, userId, vehicleNumber, startTime, endTime } = req.body;
+    if (incomingMsg.startsWith("BOOK")) {
+      const [, location, date, time] = incomingMsg.split(" ");
+      const slotRef = db.collection("parkingSlots")
+        .doc(`${location}_${date}_${time}`);
+      const doc = await slotRef.get();
 
-    if (!slotId || !userId || !vehicleNumber || !startTime || !endTime) {
-      return res.status(400).json({ error: "Missing required fields" });
+      if (doc.exists) {
+        // Already booked
+        await twilioClient.messages.create({
+          body: `❌ Slot unavailable at ${location} on ${date} ${time}`,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: from
+        });
+      } else {
+        // Book slot
+        await slotRef.set({
+          location,
+          date,
+          time,
+          bookedBy: from,
+          createdAt: new Date()
+        });
+        await twilioClient.messages.create({
+          body: `✅ Slot booked at ${location} on ${date} ${time}`,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to: from
+        });
+      }
+    } else {
+      await twilioClient.messages.create({
+        body: "⚠️ Invalid format. Use: BOOK <location> <YYYY-MM-DD> <HH:MM>",
+        from: process.env.TWILIO_PHONE_NUMBER,
+        to: from
+      });
     }
-
-    const newBooking = {
-      slotId,
-      userId,
-      vehicleNumber,
-      startTime: new Date(startTime),
-      endTime: new Date(endTime),
-      createdAt: new Date(),
-      status: "Booked",
-      paymentComplete: false,
-    };
-
-    const bookingRef = await db.collection("bookings").add(newBooking);
-
-    res.status(201).json({ id: bookingRef.id, ...newBooking });
-  } catch (error) {
-    console.error("Error creating booking:", error);
-    res.status(500).json({ error: "Internal Server Error" });
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Error:", err);
+    res.sendStatus(500);
   }
 });
 
-// Get all bookings
-app.get("/api/bookings", async (req, res) => {
-  try {
-    const snapshot = await db.collection("bookings").get();
-    const bookings = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
-    res.json(bookings);
-  } catch (error) {
-    console.error("Error fetching bookings:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// Get a single booking
-app.get("/api/bookings/:id", async (req, res) => {
-  try {
-    const doc = await db.collection("bookings").doc(req.params.id).get();
-    if (!doc.exists) {
-      return res.status(404).json({ error: "Booking not found" });
-    }
-    res.json({ id: doc.id, ...doc.data() });
-  } catch (error) {
-    console.error("Error fetching booking:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// Update booking (status, payment, etc.)
-app.put("/api/bookings/:id", async (req, res) => {
-  try {
-    const updateData = req.body;
-
-    await db.collection("bookings").doc(req.params.id).update(updateData);
-
-    res.json({ message: "Booking updated successfully" });
-  } catch (error) {
-    console.error("Error updating booking:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// Delete booking
-app.delete("/api/bookings/:id", async (req, res) => {
-  try {
-    await db.collection("bookings").doc(req.params.id).delete();
-    res.json({ message: "Booking deleted successfully" });
-  } catch (error) {
-    console.error("Error deleting booking:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-// ==========================
-// START SERVER
-// ==========================
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-});
+app.listen(3000, () => console.log("🚀 Server running on port 3000"));
