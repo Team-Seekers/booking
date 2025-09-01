@@ -1,73 +1,129 @@
-// server.js
 import express from "express";
 import bodyParser from "body-parser";
+import dotenv from "dotenv";
 import twilio from "twilio";
 import admin from "firebase-admin";
-import fs from "fs";
+import cors from "cors";
 
-// Load service account JSON manually
-const serviceAccount = JSON.parse(fs.readFileSync("./serviceAccountKey.json", "utf8"));
+// Load env
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+
+// Firebase init
+import serviceAccount from "./serviceAccountKey.json" assert { type: "json" };
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://<your-project-id>.firebaseio.com"
 });
 
 const db = admin.firestore();
 
-const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+// Root
+app.get("/", (req, res) => {
+  res.send("🚀 Parking Booking SMS server running...");
+});
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
+// SMS booking endpoint
 app.post("/sms", async (req, res) => {
-  const incomingMsg = req.body.Body.trim();
-  const from = req.body.From;
+  const incomingMsg = req.body.Body || "";
+  const fromNumber = req.body.From;
+
+  console.log(`📩 Incoming SMS: ${incomingMsg} from ${fromNumber}`);
+
+  const parts = incomingMsg.trim().split(" ");
+
+  if (parts.length < 4 || parts[0].toLowerCase() !== "book") {
+    return res.set("Content-Type", "application/xml").send(
+      `<Response><Message>❌ Invalid format. Use: BOOK CITY DATE TIME</Message></Response>`
+    );
+  }
+
+  const [_, city, date, time] = parts;
+  const lotRef = db.collection("parkingAreas").doc(city.toLowerCase() + "Lot");
 
   try {
-    if (incomingMsg.startsWith("BOOK")) {
-      const [, location, date, time] = incomingMsg.split(" ");
-      const slotRef = db.collection("parkingSlots")
-        .doc(`${location}_${date}_${time}`);
-      const doc = await slotRef.get();
-
-      if (doc.exists) {
-        // Already booked
-        await twilioClient.messages.create({
-          body: `❌ Slot unavailable at ${location} on ${date} ${time}`,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          to: from
-        });
-      } else {
-        // Book slot
-        await slotRef.set({
-          location,
-          date,
-          time,
-          bookedBy: from,
-          createdAt: new Date()
-        });
-        await twilioClient.messages.create({
-          body: `✅ Slot booked at ${location} on ${date} ${time}`,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          to: from
-        });
-      }
-    } else {
-      await twilioClient.messages.create({
-        body: "⚠️ Invalid format. Use: BOOK <location> <YYYY-MM-DD> <HH:MM>",
-        from: process.env.TWILIO_PHONE_NUMBER,
-        to: from
-      });
+    const lotSnap = await lotRef.get();
+    if (!lotSnap.exists) {
+      throw new Error(`No parking lot found for ${city}`);
     }
-    res.sendStatus(200);
+
+    const lotData = lotSnap.data();
+    let slots = lotData.slots || [];
+
+    // Convert requested start time into ISO format
+    const startTime = new Date(`${date}T${time}:00Z`);
+    const endTime = new Date(startTime);
+    endTime.setHours(endTime.getHours() + 1); // booking default 1hr
+
+    let bookedSlot = null;
+
+    // Find first available slot
+    for (let slot of slots) {
+      let bookings = slot.bookings || [];
+      let isAvailable = true;
+
+      for (let booking of bookings) {
+        const bookingStart = new Date(booking.startTime);
+        const bookingEnd = new Date(booking.endTime);
+
+        // Check if times overlap
+        if (
+          (startTime >= bookingStart && startTime < bookingEnd) ||
+          (endTime > bookingStart && endTime <= bookingEnd)
+        ) {
+          isAvailable = false;
+          break;
+        }
+      }
+
+      if (isAvailable) {
+        bookedSlot = slot;
+        break;
+      }
+    }
+
+    if (!bookedSlot) {
+      throw new Error(`No available slots at ${city} on ${date} ${time}`);
+    }
+
+    // Add booking
+    const newBooking = {
+      createdAt: new Date().toISOString(),
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+      status: "active",
+      userId: fromNumber,
+      vehicleNumber: "UNKNOWN", // can be extended
+      paymentComplete: false,
+    };
+
+    bookedSlot.bookings = bookedSlot.bookings || [];
+    bookedSlot.bookings.push(newBooking);
+
+    // Update Firestore
+    await lotRef.update({
+      slots: slots,
+      availableSpots: admin.firestore.FieldValue.increment(-1),
+    });
+
+    return res.set("Content-Type", "application/xml").send(
+      `<Response><Message>✅ Booking confirmed at ${city} (Slot: ${bookedSlot.slotId}) on ${date} ${time}</Message></Response>`
+    );
   } catch (err) {
-    console.error("Error:", err);
-    res.sendStatus(500);
+    console.error("🔥 Booking Error:", err.message);
+
+    return res.set("Content-Type", "application/xml").send(
+      `<Response><Message>❌ ${err.message}</Message></Response>`
+    );
   }
 });
 
-app.listen(3000, () => console.log("🚀 Server running on port 3000"));
+// Start server
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
