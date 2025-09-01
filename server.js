@@ -1,13 +1,11 @@
+// server.js
 import express from "express";
-import bodyParser from "body-parser";
 import cors from "cors";
+import bodyParser from "body-parser";
 import admin from "firebase-admin";
-import { readFileSync } from "fs";
 
-// Load Firebase service account key
-const serviceAccount = JSON.parse(
-  readFileSync("./serviceAccountKey.json", "utf8")
-);
+// Initialize Firebase Admin SDK
+import serviceAccount from "./serviceAccountKey.json" assert { type: "json" };
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -19,77 +17,95 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// 🔹 Book a slot
-app.post("/book", async (req, res) => {
+// ==========================
+// BOOKING ROUTES
+// ==========================
+
+// Create a booking
+app.post("/api/bookings", async (req, res) => {
   try {
     const { slotId, userId, vehicleNumber, startTime, endTime } = req.body;
 
-    if (!slotId || !userId || !startTime || !endTime) {
-      return res.status(400).json({ message: "Missing required fields" });
+    if (!slotId || !userId || !vehicleNumber || !startTime || !endTime) {
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const bookingsRef = db.collection("bookings");
-    const snapshot = await bookingsRef
-      .where("slotId", "==", slotId)
-      .where("endTime", ">", startTime) // overlapping check
-      .where("startTime", "<", endTime)
-      .get();
-
-    if (!snapshot.empty) {
-      return res.status(409).json({
-        success: false,
-        message: "Slot is already booked for this time",
-      });
-    }
-
-    // If available → create booking
     const newBooking = {
       slotId,
       userId,
-      vehicleNumber: vehicleNumber || null,
-      startTime,
-      endTime,
-      createdAt: admin.firestore.Timestamp.now(),
+      vehicleNumber,
+      startTime: new Date(startTime),
+      endTime: new Date(endTime),
+      createdAt: new Date(),
       status: "Booked",
       paymentComplete: false,
     };
 
-    const bookingDoc = await bookingsRef.add(newBooking);
+    const bookingRef = await db.collection("bookings").add(newBooking);
 
-    return res.json({
-      success: true,
-      message: "Slot booked successfully",
-      bookingId: bookingDoc.id,
-    });
-  } catch (err) {
-    console.error("Error booking slot:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(201).json({ id: bookingRef.id, ...newBooking });
+  } catch (error) {
+    console.error("Error creating booking:", error);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-// 🔹 Check slot availability
-app.get("/availability/:slotId", async (req, res) => {
+// Get all bookings
+app.get("/api/bookings", async (req, res) => {
   try {
-    const { slotId } = req.params;
-    const { startTime, endTime } = req.query;
+    const snapshot = await db.collection("bookings").get();
+    const bookings = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
-    const bookingsRef = db.collection("bookings");
-    const snapshot = await bookingsRef
-      .where("slotId", "==", slotId)
-      .where("endTime", ">", startTime)
-      .where("startTime", "<", endTime)
-      .get();
-
-    if (snapshot.empty) {
-      return res.json({ available: true });
-    } else {
-      return res.json({ available: false });
-    }
-  } catch (err) {
-    console.error("Error checking availability:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.json(bookings);
+  } catch (error) {
+    console.error("Error fetching bookings:", error);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-const PORT = 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// Get a single booking
+app.get("/api/bookings/:id", async (req, res) => {
+  try {
+    const doc = await db.collection("bookings").doc(req.params.id).get();
+    if (!doc.exists) {
+      return res.status(404).json({ error: "Booking not found" });
+    }
+    res.json({ id: doc.id, ...doc.data() });
+  } catch (error) {
+    console.error("Error fetching booking:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// Update booking (status, payment, etc.)
+app.put("/api/bookings/:id", async (req, res) => {
+  try {
+    const updateData = req.body;
+
+    await db.collection("bookings").doc(req.params.id).update(updateData);
+
+    res.json({ message: "Booking updated successfully" });
+  } catch (error) {
+    console.error("Error updating booking:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// Delete booking
+app.delete("/api/bookings/:id", async (req, res) => {
+  try {
+    await db.collection("bookings").doc(req.params.id).delete();
+    res.json({ message: "Booking deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting booking:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// ==========================
+// START SERVER
+// ==========================
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
